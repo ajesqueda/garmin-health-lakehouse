@@ -1,0 +1,18 @@
+[project]
+name = "garmin-lakehouse"
+version = "0.1.0"
+description = "Bronze/silver/gold lakehouse for Garmin Connect health data on Databricks"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

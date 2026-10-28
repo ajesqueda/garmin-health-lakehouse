@@ -1,0 +1,5 @@
+# Matches the Spark 4 line used by Databricks serverless compute.
+pyspark>=4.0,<5
+garminconnect==0.3.20
+pytest>=8
+ruff>=0.6
