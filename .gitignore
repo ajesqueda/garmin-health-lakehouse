@@ -218,3 +218,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Personal health data and credentials: never committed ---
+/inbox/
+/data/
+/landing/
+*.token.json
+garmin_tokens*.json
+.garminconnect/
+# Databricks bundle state
+.databricks/
+.DS_Store
+.ruff_cache/
