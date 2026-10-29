@@ -20,19 +20,20 @@ data needs reliable daily ingestion, deduplication, typing and history.
 
 ```
 Garmin Connect ──(garminconnect, 6 AM job)──▶ UC Volume: landing/<endpoint>/<date>.json
-                                                 │  Auto Loader
+                                                 │  Auto Loader (incremental: new files only)
                                                  ▼
- BRONZE  bronze_garmin_raw          one row per file; payload kept as raw JSON text
-                                                 │
+ BRONZE  bronze_garmin_raw          STREAMING TABLE, append-only, Change Data Feed on;
+                                    one row per file, payload kept as raw JSON text
+                                                 │  stream → parse (temporary views)
+                                                 ▼  Auto CDC (create_auto_cdc_flow)
+ SILVER  silver_daily_summary  silver_sleep  silver_hrv  silver_training_readiness
+                                    STREAMING TABLES, SCD TYPE 2 keyed on calendar_date,
+                                    ordered by fetched_at; a new version only when a
+                                    value changes. silver_activities: SCD type 1.
+                                                 │  current rows (__END_AT IS NULL)
                                                  ▼
- SILVER  silver_daily_summary  silver_sleep  silver_hrv
-         silver_training_readiness  silver_activities
-                                    typed columns, one row per day (latest fetch wins),
-                                    data-quality expectations on plausible ranges
-                                                 │
-                                                 ▼
- GOLD    gold_daily_recovery        one row per day: today's signals vs my previous
-                                    7-day baseline, plus acute:chronic training load
+ GOLD    gold_daily_recovery        MATERIALIZED VIEW, one row per day: today's signals
+                                    vs my previous 7-day baseline + acute:chronic load
 ```
 
 Design decisions:
@@ -42,12 +43,26 @@ Design decisions:
   silver's field map (`FIELDS` in `transforms.py`) needs updating.
 - **One file per endpoint per day, re-fetched for recent days.** Garmin keeps updating
   "today" and "last night" as the watch syncs. The last 2 days are re-pulled each run,
-  bronze keeps every version, and silver keeps the latest. Days with no data get a
-  `null` marker file so they aren't requested forever.
+  and bronze keeps every version. Days with no data get a `null` marker file so they
+  aren't requested forever.
+- **Incremental, not full scans.** Garmin's API has no change feed, so the source can't
+  provide CDC. The pipeline builds its own instead:
+  - Auto Loader only reads landing files it hasn't seen before.
+  - Bronze is an append-only streaming table with Change Data Feed enabled.
+  - Silver uses **Auto CDC with SCD type 2**: every re-fetch is upserted by key and
+    ordered by `fetched_at`.
+  - `track_history_except_column_list=["fetched_at"]` makes an identical re-fetch a
+    no-op, so a new version (with `__START_AT`/`__END_AT`) only opens when Garmin
+    actually revises a value, for example last night's sleep after a late sync.
+  - Gold reads only the current rows.
+- **Parsing is stream-safe.** `parse_*` functions use no windows or aggregations. A
+  local test runs each one on a real Spark stream, and another test proves the old
+  `row_number()` dedup would be rejected on a stream.
 - **Baselines exclude the current day.** "HRV 20% below baseline" compares last night
   with the 7 nights before it, not with a window that includes itself.
-- **Logic is separate from orchestration.** `pipelines/garmin_pipeline.py` only declares
-  tables and expectations. All transformations are plain PySpark functions that are
+- **Logic is separate from orchestration.** `pipelines/garmin_pipeline.py` (a
+  Databricks notebook in source format, so it opens as a notebook in the UI) only
+  declares tables, flows and expectations. All transformations are plain PySpark functions that are
   unit-tested locally on synthetic data.
 - **No credentials or health data in git.** Garmin credentials live in a Databricks
   secret scope, real data lives only in Databricks, and tests use synthetic payloads.
@@ -117,12 +132,12 @@ databricks bundle run garmin_daily
 
 ```
 databricks.yml                 bundle: schema, volume, pipeline, 6 AM job
-pipelines/garmin_pipeline.py   Lakeflow table declarations + expectations
+pipelines/garmin_pipeline.py   notebook: Lakeflow tables, Auto CDC flows, expectations
+notebooks/ingest_garmin.py     notebook: job task 1; reads secrets, pulls Garmin data
 src/garmin_lakehouse/
   ingest.py                    Garmin -> landing JSON (idempotent, rate-limit aware)
-  transforms.py                bronze/silver/gold as tested PySpark functions
+  transforms.py                bronze parse, stream-safe silver parse, gold features
 scripts/
-  ingest_job.py                job entry point; reads Databricks secrets
   create_garmin_tokens.py      one-time local login that saves reusable tokens
 tests/                         pytest + local Spark on synthetic data
 ```
