@@ -16,3 +16,9 @@ addopts = "-q"
 pythonpath = ["src"]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff.lint.per-file-ignores]
+# Databricks notebooks: `spark`/`dbutils` are injected, imports follow
+# setup cells (%pip, sys.path), and %md cells hold long markdown table rows.
+"pipelines/*.py" = ["E402", "F821", "E501"]
+"notebooks/*.py" = ["E402", "F821", "E501"]
