@@ -119,20 +119,35 @@ def _endpoint(bronze: DataFrame, endpoint: str) -> DataFrame:
     return bronze.filter((F.col("endpoint") == endpoint) & F.col("payload").isNotNull())
 
 
-def silver_daily(bronze: DataFrame, endpoint: str) -> DataFrame:
-    """For object-per-day endpoints: typed columns, latest fetch per day."""
-    rows = _endpoint(bronze, endpoint).select(
+# Silver is built in two steps:
+#
+#   parse_*   typed columns, one row per bronze row/element. No windows or
+#             aggregations, so these work on a *stream* of bronze rows. The
+#             pipeline feeds them to Auto CDC, which does the deduplication
+#             incrementally and keeps SCD type 2 history.
+#   silver_*  parse_* plus "latest version per key", as one batch query. Used
+#             by tests and local runs; gives the same result as the current
+#             rows of the pipeline's SCD2 tables.
+
+# Business keys and the column that orders versions of the same key.
+KEYS = {
+    "daily_summary": ["calendar_date"],
+    "sleep": ["calendar_date"],
+    "hrv": ["calendar_date"],
+    "training_readiness": ["calendar_date"],
+    "activities": ["activity_id"],
+}
+
+
+def parse_daily(bronze: DataFrame, endpoint: str) -> DataFrame:
+    """Object-per-day endpoints: typed columns, every fetch kept."""
+    return _endpoint(bronze, endpoint).select(
         "calendar_date", "fetched_at", *_extract(F.col("payload"), endpoint)
     )
-    return _latest(rows, ["calendar_date"], [F.col("fetched_at").desc()])
 
 
-def silver_daily_summary(bronze: DataFrame) -> DataFrame:
-    return silver_daily(bronze, "daily_summary")
-
-
-def silver_sleep(bronze: DataFrame) -> DataFrame:
-    df = silver_daily(bronze, "sleep")
+def parse_sleep(bronze: DataFrame) -> DataFrame:
+    df = parse_daily(bronze, "sleep")
     total = F.col("sleep_seconds")
     return df.select(
         "*",
@@ -140,10 +155,6 @@ def silver_sleep(bronze: DataFrame) -> DataFrame:
         F.round(F.col("deep_sleep_seconds") / total * 100, 1).alias("deep_sleep_pct"),
         F.round(F.col("rem_sleep_seconds") / total * 100, 1).alias("rem_sleep_pct"),
     )
-
-
-def silver_hrv(bronze: DataFrame) -> DataFrame:
-    return silver_daily(bronze, "hrv")
 
 
 def _explode(bronze: DataFrame, endpoint: str) -> DataFrame:
@@ -155,26 +166,52 @@ def _explode(bronze: DataFrame, endpoint: str) -> DataFrame:
     )
 
 
-def silver_training_readiness(bronze: DataFrame) -> DataFrame:
-    """Garmin re-scores readiness during the day; keep the latest score per day."""
-    rows = _explode(bronze, "training_readiness").select(
+def parse_training_readiness(bronze: DataFrame) -> DataFrame:
+    """One row per readiness measurement. Garmin re-scores during the day."""
+    return _explode(bronze, "training_readiness").select(
         "calendar_date", "fetched_at", *_extract(F.col("element"), "training_readiness")
     )
+
+
+def parse_activities(bronze: DataFrame) -> DataFrame:
+    """One row per activity per fetch."""
+    rows = _explode(bronze, "activities").select(
+        "fetched_at", *_extract(F.col("element"), "activities")
+    )
+    return rows.filter(F.col("activity_id").isNotNull()).withColumn(
+        "activity_date", F.to_date("start_time_local")
+    )
+
+
+def silver_daily(bronze: DataFrame, endpoint: str) -> DataFrame:
+    """Latest fetch per day for an object-per-day endpoint."""
+    return _latest(parse_daily(bronze, endpoint), ["calendar_date"], [F.col("fetched_at").desc()])
+
+
+def silver_daily_summary(bronze: DataFrame) -> DataFrame:
+    return silver_daily(bronze, "daily_summary")
+
+
+def silver_sleep(bronze: DataFrame) -> DataFrame:
+    return _latest(parse_sleep(bronze), ["calendar_date"], [F.col("fetched_at").desc()])
+
+
+def silver_hrv(bronze: DataFrame) -> DataFrame:
+    return silver_daily(bronze, "hrv")
+
+
+def silver_training_readiness(bronze: DataFrame) -> DataFrame:
+    """Latest readiness score per day (the pipeline orders by the same pair)."""
     return _latest(
-        rows,
+        parse_training_readiness(bronze),
         ["calendar_date"],
-        [F.col("measured_at").desc_nulls_last(), F.col("fetched_at").desc()],
+        [F.col("fetched_at").desc(), F.col("measured_at").desc_nulls_last()],
     )
 
 
 def silver_activities(bronze: DataFrame) -> DataFrame:
     """One row per activity. A refetch of the same day must not duplicate it."""
-    rows = _explode(bronze, "activities").select(
-        "fetched_at", *_extract(F.col("element"), "activities")
-    )
-    rows = rows.filter(F.col("activity_id").isNotNull())
-    rows = _latest(rows, ["activity_id"], [F.col("fetched_at").desc()])
-    return rows.withColumn("activity_date", F.to_date("start_time_local"))
+    return _latest(parse_activities(bronze), ["activity_id"], [F.col("fetched_at").desc()])
 
 
 # --------------------------------------------------------------------------

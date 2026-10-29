@@ -38,7 +38,9 @@ resources:
       serverless: true
       channel: CURRENT
       libraries:
-        - file:
+        # A .py file in Databricks notebook source format (cells + %md), so it
+        # opens as a notebook in the workspace UI.
+        - notebook:
             path: ./pipelines/garmin_pipeline.py
       configuration:
         bundle.sourcePath: ${workspace.file_path}/src
@@ -55,32 +57,20 @@ resources:
       max_concurrent_runs: 1
       tasks:
         - task_key: ingest
-          environment_key: ingest_env
-          spark_python_task:
-            python_file: ./scripts/ingest_job.py
-            parameters:
-              - --src
-              - ${workspace.file_path}/src
-              - --landing
-              - /Volumes/${var.catalog}/${resources.schemas.garmin.name}/landing
-              - --secret-scope
-              - ${var.secret_scope}
-              - --days
-              - "7"
-              - --timezone
-              - America/Chicago
+          notebook_task:
+            notebook_path: ./notebooks/ingest_garmin.py
+            source: WORKSPACE
+            base_parameters:
+              src: ${workspace.file_path}/src
+              landing: /Volumes/${var.catalog}/${resources.schemas.garmin.name}/landing
+              secret_scope: ${var.secret_scope}
+              days: "7"
+              timezone: America/Chicago
         - task_key: medallion
           depends_on:
             - task_key: ingest
           pipeline_task:
             pipeline_id: ${resources.pipelines.garmin_medallion.id}
-      environments:
-        - environment_key: ingest_env
-          spec:
-            # Serverless environment 4 runs Python 3.12; garminconnect needs >= 3.12.
-            environment_version: "4"
-            dependencies:
-              - garminconnect==0.3.20
 
 targets:
   free:
