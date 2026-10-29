@@ -15,7 +15,7 @@ The bundle's `free` target uses the `free` profile (see `databricks.yml`).
 
 ## 2. Store Garmin credentials as Databricks secrets
 
-The daily job reads credentials from a secret scope named `garmin`. Type each value at
+The daily job's ingest notebook (`notebooks/ingest_garmin.py`) reads credentials from a secret scope named `garmin`. Type each value at
 the prompt so it never lands in your shell history:
 
 ```bash
