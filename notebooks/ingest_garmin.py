@@ -45,7 +45,7 @@ landing = dbutils.widgets.get("landing")
 scope = dbutils.widgets.get("secret_scope")
 days = int(dbutils.widgets.get("days"))
 timezone = dbutils.widgets.get("timezone")
-token_store = Path(dbutils.widgets.get("token_store"))
+token_store = dbutils.widgets.get("token_store")
 
 # COMMAND ----------
 
@@ -57,6 +57,7 @@ from zoneinfo import ZoneInfo
 
 if src:
     sys.path.insert(0, src)
+token_store = Path(token_store)
 
 from garmin_lakehouse.ingest import (
     date_range,
