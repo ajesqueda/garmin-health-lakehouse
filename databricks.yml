@@ -30,6 +30,13 @@ resources:
       volume_type: MANAGED
       comment: Raw JSON files from Garmin Connect, one per endpoint per day
 
+    auth:
+      catalog_name: ${var.catalog}
+      schema_name: ${resources.schemas.garmin.name}
+      name: auth
+      volume_type: MANAGED
+      comment: Current Garmin tokens, rewritten by the ingest job after every login (kept out of landing so Auto Loader never reads them)
+
   pipelines:
     garmin_medallion:
       name: garmin-medallion
@@ -66,6 +73,7 @@ resources:
               secret_scope: ${var.secret_scope}
               days: "7"
               timezone: America/Chicago
+              token_store: /Volumes/${var.catalog}/${resources.schemas.garmin.name}/auth/garmin_tokens.json
         - task_key: medallion
           depends_on:
             - task_key: ingest

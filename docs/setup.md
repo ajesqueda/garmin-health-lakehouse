@@ -40,8 +40,17 @@ databricks secrets put-secret garmin tokens --profile free \
   --string-value "$(cat ~/.garminconnect/garmin_tokens.json)"
 ```
 
-When a `tokens` secret exists, the job uses it and ignores `email` and `password`. You
-can then remove the password:
+When a `tokens` secret exists, the job uses it and ignores `email` and `password`.
+
+The secret only *seeds* the login. Garmin hands out a new refresh token every time the
+short-lived access token (about a day) is refreshed, and the old one soon stops
+working. So after each login the job saves the rotated tokens to
+`/Volumes/workspace/garmin/auth/garmin_tokens.json` and reads that file first the next
+morning. The `auth` Volume is separate from `landing` so Auto Loader never picks the
+tokens up as data. Without that step the secret goes stale within a few days and every
+run fails at login with `Failed to retrieve social profile`.
+
+You can then remove the password:
 
 ```bash
 databricks secrets delete-secret garmin password --profile free
@@ -81,6 +90,28 @@ LIMIT 20;
 A silver column that's entirely `NULL` while the payload clearly has the value means
 its path needs updating in `FIELDS`. Bronze never needs a change, because it stores
 the payload as raw text.
+
+## Troubleshooting: the daily job stopped
+
+Check the run history in **Jobs & Pipelines → garmin-daily**. Free Edition purges
+failed runs from that list after a while, so if it looks empty, query the system tables:
+
+```sql
+SELECT period_start_time, task_key, result_state, termination_code
+FROM system.lakeflow.job_task_run_timeline
+WHERE job_id = '<garmin-daily job id>'
+ORDER BY period_start_time DESC
+LIMIT 20;
+```
+
+- **`ingest` FAILED, `medallion` SKIPPED, error `Failed to retrieve social profile`:**
+  every saved token has expired (for example after the job didn't run for a long time).
+  Regenerate them with step 3, then run the job once. The job falls back to the fresh
+  secret and rewrites the token store.
+- **No runs at all, schedule still `UNPAUSED`:** after several failed days the Free
+  Edition scheduler stopped starting runs without logging a pause. Redeploying
+  (`databricks bundle deploy`) re-saves the schedule; check the next morning that a
+  `CRON` run appears.
 
 ## Fallback: ingest from your laptop
 
