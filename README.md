@@ -105,6 +105,14 @@ Problems the first runs exposed, each fixed:
    tomorrow. "Today" is now computed in `America/Chicago`.
 4. **`raise SystemExit(0)` fails a Databricks task.** Databricks treats any
    `SystemExit` as a failure, so the entry point only raises on a real error.
+5. **Saved tokens went stale after 3 days (Oct 31).** Garmin rotates the refresh token
+   on every refresh, but the job kept logging in from the original copy in the secret
+   and never saved the new one. Ingest started failing with `Failed to retrieve social
+   profile`, and after three failed days the Free Edition scheduler stopped starting runs
+   at all. The job now writes the rotated tokens to a separate `auth` Volume after every
+   login and reads them first the next day (`login_with_token_store`); the secret is only
+   the seed and the fallback after regenerating. See
+   [docs/setup.md](docs/setup.md#troubleshooting-the-daily-job-stopped).
 
 ## How to run
 

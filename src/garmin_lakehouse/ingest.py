@@ -10,9 +10,13 @@ The payload is stored untouched. Bronze keeps it as a raw string, so a change in
 Garmin's response shape can never break ingestion. Parsing happens in silver.
 
 Authentication uses saved Garmin tokens (see scripts/create_garmin_tokens.py),
-never a stored password. The landing folder can be a local directory or a
-Unity Catalog Volume path such as /Volumes/workspace/garmin/landing, since
-Databricks mounts Volumes as ordinary files.
+never a stored password. Garmin rotates the refresh token every time the access
+token is refreshed, so the tokens have to be saved back after each login
+(`login_with_token_store`); a copy that is never updated stops working within days.
+
+The landing folder can be a local directory or a Unity Catalog Volume path such
+as /Volumes/workspace/garmin/landing, since Databricks mounts Volumes as ordinary
+files.
 
     python -m garmin_lakehouse.ingest --landing ./data/landing --days 7
 """
@@ -163,6 +167,56 @@ def login_with_tokens(tokens: str) -> GarminClient:
     return client
 
 
+def export_tokens(client: Any) -> str:
+    """The client's current tokens as JSON, including any refresh that happened."""
+    return client.client.dumps()
+
+
+def save_tokens(client: Any, store: Path) -> None:
+    """Write the current tokens to `store` (owner-only where the filesystem allows)."""
+    _write_atomic(store, export_tokens(client))
+    try:
+        os.chmod(store, 0o600)
+    except OSError:
+        pass  # Volume mounts don't support chmod; access is governed by Unity Catalog
+
+
+def login_with_token_store(
+    store: Path,
+    fallback: str | None,
+    login: Callable[[str], Any] = login_with_tokens,
+) -> tuple[Any, str]:
+    """Log in with the newest tokens we have, then save the rotated ones back.
+
+    Tries the saved copy in `store` first (it's the one kept current), then
+    `fallback` (the token JSON from the secret). The fallback matters after
+    regenerating tokens by hand: the saved copy is stale, the secret is fresh.
+    Returns the client and which source worked ("store" or "fallback").
+    """
+    attempts = []
+    if store.exists():
+        attempts.append(("store", store.read_text(encoding="utf-8")))
+    if fallback:
+        attempts.append(("fallback", fallback))
+    if not attempts:
+        raise RuntimeError(f"no Garmin tokens: {store} doesn't exist and no fallback was given")
+
+    errors = []
+    for source, tokens in attempts:
+        try:
+            client = login(tokens)
+        except Exception as exc:  # noqa: BLE001 - try the next source
+            errors.append(f"{source}: {type(exc).__name__}: {exc}")
+            log.warning("token login from %s failed: %s", source, type(exc).__name__)
+            continue
+        save_tokens(client, store)
+        return client, source
+    raise RuntimeError(
+        "every saved Garmin token failed (regenerate with scripts/create_garmin_tokens.py "
+        "and update the `tokens` secret): " + "; ".join(errors)
+    )
+
+
 def login_with_password(email: str, password: str) -> GarminClient:
     """Log in with email + password. Fails if the account has MFA turned on,
     because an unattended job has no one to type the code; use tokens then."""
@@ -183,12 +237,20 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("GARMINTOKENS"),
         help="token JSON or token file path (default: $GARMINTOKENS)",
     )
+    parser.add_argument(
+        "--token-store",
+        type=Path,
+        help="file to keep rotated tokens in; read first, rewritten after every login",
+    )
     args = parser.parse_args(argv)
-    if not args.tokens:
+    if not args.tokens and not (args.token_store and args.token_store.exists()):
         parser.error("no tokens: run scripts/create_garmin_tokens.py first, then set GARMINTOKENS")
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    client = login_with_tokens(args.tokens)
+    if args.token_store:
+        client, _ = login_with_token_store(args.token_store, args.tokens)
+    else:
+        client = login_with_tokens(args.tokens)
     end = args.end or date.today()
     report = ingest(client, args.landing, date_range(end, args.days), today=end)
     log.info(
