@@ -6,10 +6,14 @@
 # MAGIC `garmin` secret scope and writes one JSON file per endpoint per day to the landing
 # MAGIC Volume, where the pipeline's Auto Loader picks them up.
 # MAGIC
-# MAGIC | Secret | Used for |
+# MAGIC | Source | Used for |
 # MAGIC |--------|----------|
-# MAGIC | `tokens` | saved token JSON from `scripts/create_garmin_tokens.py` (preferred; works with MFA) |
-# MAGIC | `email` + `password` | fallback, only if `tokens` is missing |
+# MAGIC | `token_store` file (auth Volume) | the current tokens; rewritten after every login |
+# MAGIC | `tokens` secret | saved token JSON from `scripts/create_garmin_tokens.py`; seeds the store, and is the fallback after regenerating |
+# MAGIC | `email` + `password` secrets | last resort, only if no tokens exist (fails with MFA) |
+# MAGIC
+# MAGIC Garmin rotates the refresh token on every refresh, so a token copy that is never
+# MAGIC written back (like a secret) stops working after a few days. The store fixes that.
 # MAGIC
 # MAGIC Secret values are never printed; Databricks also redacts them in output.
 
@@ -34,12 +38,14 @@ dbutils.widgets.text("landing", "/Volumes/workspace/garmin/landing", "Landing Vo
 dbutils.widgets.text("secret_scope", "garmin", "Secret scope")
 dbutils.widgets.text("days", "7", "Days to pull")
 dbutils.widgets.text("timezone", "America/Chicago", "Local timezone")
+dbutils.widgets.text("token_store", "/Volumes/workspace/garmin/auth/garmin_tokens.json", "Token store")
 
 src = dbutils.widgets.get("src")
 landing = dbutils.widgets.get("landing")
 scope = dbutils.widgets.get("secret_scope")
 days = int(dbutils.widgets.get("days"))
 timezone = dbutils.widgets.get("timezone")
+token_store = Path(dbutils.widgets.get("token_store"))
 
 # COMMAND ----------
 
@@ -52,7 +58,13 @@ from zoneinfo import ZoneInfo
 if src:
     sys.path.insert(0, src)
 
-from garmin_lakehouse.ingest import date_range, ingest, login_with_password, login_with_tokens
+from garmin_lakehouse.ingest import (
+    date_range,
+    ingest,
+    login_with_password,
+    login_with_token_store,
+    save_tokens,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s", force=True)
 log = logging.getLogger("ingest_garmin")
@@ -68,14 +80,15 @@ def read_secret(key: str) -> str | None:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Log in (tokens first, password as fallback)
+# MAGIC ## Log in (token store, then the `tokens` secret, then password)
+# MAGIC The rotated tokens are written back to the store right after login.
 
 # COMMAND ----------
 
 tokens = read_secret("tokens")
-if tokens:
-    log.info("logging in to Garmin with saved tokens")
-    client = login_with_tokens(tokens)
+if tokens or token_store.exists():
+    client, source = login_with_token_store(token_store, tokens)
+    log.info("logged in to Garmin with tokens from the %s", source)
 else:
     email, password = read_secret("email"), read_secret("password")
     if not (email and password):
@@ -103,5 +116,9 @@ log.info(
 )
 for key, reason in report.failed.items():
     log.warning("failed %s: %s", key, reason)
+
+# A refresh can also happen mid-run; save once more so tomorrow starts current.
+if tokens or token_store.exists():
+    save_tokens(client, token_store)
 # Partial failures (one endpoint, one day) don't block the pipeline refresh;
 # a login failure has already raised above.
