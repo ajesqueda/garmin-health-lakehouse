@@ -117,7 +117,8 @@ Problems the first runs exposed, each fixed:
    Nov 11–15, then the scheduler stopped starting them, again without a pause event.
    Both silent stops came 4–5 days after the workspace was last used interactively,
    which points at Free Edition idling an unused workspace. A redeploy and one manual run
-   recovered it and filled the gap.
+   recovered it and filled the gap. Since then `scripts/ensure_daily_run.py` runs on the
+   laptop each morning and starts the job if the scheduler skipped it.
 
 ## How to run
 
@@ -214,6 +215,7 @@ src/garmin_lakehouse/
   health_markov.py             CLI: sleep + HRV -> state -> Markov odds for tomorrow
 scripts/
   create_garmin_tokens.py      one-time local login that saves reusable tokens
+  ensure_daily_run.py          morning check: start the job if the scheduler skipped it
 tests/                         pytest + local Spark on synthetic data
 ```
 
