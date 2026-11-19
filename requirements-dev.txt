@@ -1,5 +1,7 @@
 # Matches the Spark 4 line used by Databricks serverless compute.
 pyspark>=4.0,<5
 garminconnect==0.3.20
+# health_markov CLI (transition matrices, matrix powers)
+numpy>=1.26
 pytest>=8
 ruff>=0.6
