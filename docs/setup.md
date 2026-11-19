@@ -116,6 +116,34 @@ LIMIT 20;
   observation, not a rule. Redeploying (`databricks bundle deploy`) re-saves the
   schedule; then run the job once, since the default 7-day pull backfills the gap.
 
+## Keep the daily run going (Free Edition)
+
+The Free Edition scheduler can stop starting the 6 AM run after a few days without
+anyone using the workspace (see the troubleshooting section above).
+`scripts/ensure_daily_run.py` checks later in the morning and starts the job if no run
+succeeded today. It starts at most one run a day, and never retries a manual run that
+already failed.
+
+1. **Create a personal access token profile.** The normal CLI login expires after about
+   a week, which is too short for an unattended check. In the workspace, open
+   **Settings → Developer → Access tokens → Generate new token** (lifetime 90 days), then
+   save it as its own profile, pasting the token at the prompt:
+
+   ```bash
+   databricks configure --profile free-pat --host https://<workspace>.cloud.databricks.com
+   ```
+
+2. **Try it:** `python3 scripts/ensure_daily_run.py --profile free-pat --dry-run`
+
+3. **Schedule it with launchd (macOS)** at 9:07 every morning: fill in
+   `scripts/ensure_daily_run.plist.template` (repo path, the folder of `which databricks`
+   and `~/Library/Logs`), save it as
+   `~/Library/LaunchAgents/com.garmin-lakehouse.ensure-daily-run.plist`, then run
+   `launchctl load` on it. If the Mac is asleep at 9:07, launchd runs it at wake-up.
+   Each run adds one line to `~/Library/Logs/garmin-ensure-daily-run.log`.
+
+Renew the token before it expires (the log shows `ERROR` once it has).
+
 ## Fallback: ingest from your laptop
 
 If serverless compute can't reach Garmin from your workspace, run ingestion locally and
