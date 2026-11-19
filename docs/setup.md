@@ -135,12 +135,24 @@ already failed.
 
 2. **Try it:** `python3 scripts/ensure_daily_run.py --profile free-pat --dry-run`
 
-3. **Schedule it with launchd (macOS)** at 9:07 every morning: fill in
-   `scripts/ensure_daily_run.plist.template` (repo path, the folder of `which databricks`
-   and `~/Library/Logs`), save it as
-   `~/Library/LaunchAgents/com.garmin-lakehouse.ensure-daily-run.plist`, then run
-   `launchctl load` on it. If the Mac is asleep at 9:07, launchd runs it at wake-up.
-   Each run adds one line to `~/Library/Logs/garmin-ensure-daily-run.log`.
+3. **Schedule it with launchd (macOS)** at 9:07 every morning. macOS privacy rules stop
+   background jobs from reading files in Desktop, Documents and Downloads (the log says
+   `Operation not permitted`), so install a copy of the script outside them. It only
+   needs the standard library:
+
+   ```bash
+   APP="$HOME/Library/Application Support/garmin-lakehouse"
+   mkdir -p "$APP" ~/Library/Logs && cp scripts/ensure_daily_run.py "$APP/"
+   sed -e "s|REPO/scripts|$APP|" -e "s|DATABRICKS|$(dirname "$(which databricks)")|" \
+       -e "s|LOGS|$HOME/Library/Logs|g" scripts/ensure_daily_run.plist.template \
+       > ~/Library/LaunchAgents/com.garmin-lakehouse.ensure-daily-run.plist
+   launchctl load ~/Library/LaunchAgents/com.garmin-lakehouse.ensure-daily-run.plist
+   launchctl start com.garmin-lakehouse.ensure-daily-run   # try it once now
+   ```
+
+   If the Mac is asleep at 9:07, launchd runs it at wake-up. Each run adds one line to
+   `~/Library/Logs/garmin-ensure-daily-run.log`. After changing the script, copy it
+   again.
 
 Renew the token before it expires (the log shows `ERROR` once it has).
 
