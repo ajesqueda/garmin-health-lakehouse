@@ -113,6 +113,11 @@ Problems the first runs exposed, each fixed:
    login and reads them first the next day (`login_with_token_store`); the secret is only
    the seed and the fallback after regenerating. See
    [docs/setup.md](docs/setup.md#troubleshooting-the-daily-job-stopped).
+6. **The schedule went quiet while everything was healthy (Nov 16–18).** Runs succeeded
+   Nov 11–15, then the scheduler stopped starting them, again without a pause event.
+   Both silent stops came 4–5 days after the workspace was last used interactively,
+   which points at Free Edition idling an unused workspace. A redeploy and one manual run
+   recovered it and filled the gap.
 
 ## How to run
 
