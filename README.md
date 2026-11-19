@@ -113,6 +113,11 @@ Problems the first runs exposed, each fixed:
    login and reads them first the next day (`login_with_token_store`); the secret is only
    the seed and the fallback after regenerating. See
    [docs/setup.md](docs/setup.md#troubleshooting-the-daily-job-stopped).
+6. **The schedule went quiet while everything was healthy (Nov 16–18).** Runs succeeded
+   Nov 11–15, then the scheduler stopped starting them, again without a pause event.
+   Both silent stops came 4–5 days after the workspace was last used interactively,
+   which points at Free Edition idling an unused workspace. A redeploy and one manual run
+   recovered it and filled the gap.
 
 ## How to run
 
@@ -136,6 +141,67 @@ databricks bundle deploy
 databricks bundle run garmin_daily
 ```
 
+## Predict tomorrow with a Markov chain
+
+`health_markov` is a small command-line tool that learns from your own history which
+day tends to follow which. You give it two numbers from this morning, hours slept and
+overnight HRV, and it places today in one of four states:
+
+|                  | HRV at/above your median | HRV below your median |
+|------------------|--------------------------|-----------------------|
+| slept ≥ 7 h      | well rested              | slept well, HRV low   |
+| slept < 7 h      | short sleep, HRV ok      | run down              |
+
+It counts how often each state was followed by each other state in
+`gold_daily_recovery` (read live through the Databricks CLI), turns the counts into a
+transition matrix P, and reports the odds for tomorrow (or k days ahead, `Pᵏ`) plus the
+long-run share of days in each state (P's eigenvector for λ = 1).
+
+```bash
+databricks auth login --profile free      # if the CLI login has expired
+PYTHONPATH=src .venv/bin/python -m garmin_lakehouse.health_markov --sleep 6.5 --hrv 42
+PYTHONPATH=src .venv/bin/python -m garmin_lakehouse.health_markov --sleep 8 --hrv 55 --days 3
+```
+
+The output looks like this (made-up history of 21 days, not real data):
+
+```
+Today: 6.5 h sleep, HRV 42 ms -> run down
+  (cuts: sleep 7 h, HRV 50 ms = your median)
+
+In 1 day:
+   28.6%  well rested
+   28.6%  slept well, HRV low
+   28.6%  run down
+   14.3%  short sleep, HRV ok
+
+Long run, share of days:
+   35.9%  well rested
+   25.8%  short sleep, HRV ok
+   22.1%  slept well, HRV low
+   16.1%  run down
+
+Based on 20 day-to-day transitions; 3 of them start from 'run down'.
+Few examples from this state, so these odds lean on smoothing and will firm up as more days come in.
+```
+
+Some choices worth knowing:
+
+- **Your median, not a fixed number, decides "low HRV".** HRV varies a lot from person
+  to person, so 45 ms can be high for one person and low for another. Override with
+  `--hrv-cut`, and the sleep line with `--sleep-cut`.
+- **Gaps break the chain.** Only consecutive calendar days with both values count, so a
+  missing day never turns a two-day move into a one-day move.
+- **Add-one smoothing.** With a few weeks of data, many moves simply haven't happened
+  yet. Adding 1 to every count keeps them possible instead of exactly 0, and the tool
+  says how many examples its answer rests on.
+- **It's a Markov chain.** It assumes tomorrow depends only on today, not on the whole
+  week. That's a simplification: training load, illness or travel aren't in it.
+
+The matrix math (steady states, matrix powers, how fast a chain forgets where it
+started) is worked through from scratch in
+[ml-from-scratch/markov](https://github.com/ajesqueda/ml-from-scratch/tree/main/markov).
+
 ## Layout
 
 ```
@@ -145,6 +211,7 @@ notebooks/ingest_garmin.py     notebook: job task 1; reads secrets, pulls Garmin
 src/garmin_lakehouse/
   ingest.py                    Garmin -> landing JSON (idempotent, rate-limit aware)
   transforms.py                bronze parse, stream-safe silver parse, gold features
+  health_markov.py             CLI: sleep + HRV -> state -> Markov odds for tomorrow
 scripts/
   create_garmin_tokens.py      one-time local login that saves reusable tokens
 tests/                         pytest + local Spark on synthetic data
