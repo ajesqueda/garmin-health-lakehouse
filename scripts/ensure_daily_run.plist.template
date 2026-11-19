@@ -2,8 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   launchd job: every morning at 9:07, start garmin-daily if the 6 AM run didn't happen.
-  Replace REPO and DATABRICKS (output of `which databricks`'s folder), then copy to
-  ~/Library/LaunchAgents/ and load it (see docs/setup.md, "Keep the daily run going").
+  Point it at a copy of the script OUTSIDE Desktop/Documents/Downloads (macOS blocks
+  background jobs there). docs/setup.md, "Keep the daily run going", has the commands
+  that fill in REPO/scripts, DATABRICKS and LOGS.
 -->
 <plist version="1.0">
 <dict>
