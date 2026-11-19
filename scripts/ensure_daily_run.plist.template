@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job: every morning at 9:07, start garmin-daily if the 6 AM run didn't happen.
+  Replace REPO and DATABRICKS (output of `which databricks`'s folder), then copy to
+  ~/Library/LaunchAgents/ and load it (see docs/setup.md, "Keep the daily run going").
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.garmin-lakehouse.ensure-daily-run</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>REPO/scripts/ensure_daily_run.py</string>
+    <string>--profile</string>
+    <string>free-pat</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>DATABRICKS:/usr/bin:/bin</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>7</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>LOGS/garmin-ensure-daily-run.log</string>
+  <key>StandardErrorPath</key>
+  <string>LOGS/garmin-ensure-daily-run.log</string>
+</dict>
+</plist>
