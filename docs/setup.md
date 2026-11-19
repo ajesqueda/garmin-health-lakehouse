@@ -108,10 +108,13 @@ LIMIT 20;
   every saved token has expired (for example after the job didn't run for a long time).
   Regenerate them with step 3, then run the job once. The job falls back to the fresh
   secret and rewrites the token store.
-- **No runs at all, schedule still `UNPAUSED`:** after several failed days the Free
-  Edition scheduler stopped starting runs without logging a pause. Redeploying
-  (`databricks bundle deploy`) re-saves the schedule; check the next morning that a
-  `CRON` run appears.
+- **No runs at all, schedule still `UNPAUSED`:** the Free Edition scheduler has twice
+  stopped starting runs without logging a pause or an error: after Nov 2 (when ingest
+  was failing) and after Nov 15 (when every run was succeeding). Both times it was 4–5
+  days after anyone last used the workspace, so it looks like Free Edition stops
+  scheduling in an idle workspace. Databricks doesn't document this, so treat it as an
+  observation, not a rule. Redeploying (`databricks bundle deploy`) re-saves the
+  schedule; then run the job once, since the default 7-day pull backfills the gap.
 
 ## Fallback: ingest from your laptop
 
