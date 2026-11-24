@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import statistics
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -34,6 +37,9 @@ import numpy as np
 
 STATES = ["well rested", "short sleep, HRV ok", "slept well, HRV low", "run down"]
 DEFAULT_SLEEP_HOURS = 7.0
+CLI_TIMEOUT_S = 120
+QUERY_DEADLINE_S = 300
+TABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}")
 QUERY = (
     "SELECT calendar_date, sleep_hours, hrv_last_night "
     "FROM {table} ORDER BY calendar_date"
@@ -54,6 +60,7 @@ class Model:
     sleep_cut: float
     hrv_cut: float
     days_used: int
+    hrv_cut_is_median: bool = True
 
 
 def classify(sleep_hours: float, hrv: float, sleep_cut: float, hrv_cut: float) -> int:
@@ -89,7 +96,10 @@ def fit(days: Sequence[Day], sleep_cut: float = DEFAULT_SLEEP_HOURS,
     seen yet gets a small chance instead of exactly 0. With a few weeks of data,
     many moves simply haven't happened yet.
     """
+    if smoothing < 0:
+        raise ValueError("smoothing can't be negative: it would make negative odds")
     hrvs = [d.hrv for d in days if d.hrv is not None]
+    from_median = hrv_cut is None
     if hrv_cut is None:
         if not hrvs:
             raise ValueError("no HRV values in the history")
@@ -103,7 +113,7 @@ def fit(days: Sequence[Day], sleep_cut: float = DEFAULT_SLEEP_HOURS,
     # A state never seen as "from" (possible only without smoothing) has no
     # information, so spread its column evenly instead of dividing 0 by 0.
     P = np.where(totals > 0, smoothed / np.where(totals > 0, totals, 1), 1 / 4)
-    return Model(counts, P, sleep_cut, hrv_cut, len(pairs))
+    return Model(counts, P, sleep_cut, hrv_cut, len(pairs), from_median)
 
 
 def predict(model: Model, state: int, k: int = 1) -> np.ndarray:
@@ -124,8 +134,15 @@ def long_run(model: Model) -> np.ndarray:
 
 def _databricks(args: list[str], profile: str) -> dict:
     """Run the Databricks CLI (it handles the login) and parse its JSON output."""
-    run = subprocess.run(["databricks", *args, "--profile", profile, "-o", "json"],
-                         capture_output=True, text=True)
+    try:
+        run = subprocess.run(["databricks", *args, "--profile", profile, "-o", "json"],
+                             capture_output=True, text=True, timeout=CLI_TIMEOUT_S)
+    except FileNotFoundError:
+        raise RuntimeError("the databricks CLI isn't installed or isn't on PATH") from None
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"databricks {args[0]} didn't answer within {CLI_TIMEOUT_S} s") from None
+    except OSError as exc:
+        raise RuntimeError(f"couldn't run the databricks CLI: {exc}") from None
     if run.returncode != 0:
         if "invalid_grant" in run.stderr or "auth login" in run.stderr:
             raise RuntimeError(f"Databricks login expired: run `databricks auth login "
@@ -143,16 +160,37 @@ def find_warehouse(profile: str) -> str:
     return warehouses[0]["id"]
 
 
-def load_from_databricks(table: str, profile: str, warehouse: str | None) -> list[Day]:
-    """Read sleep and HRV for every day from the gold table."""
+def load_from_databricks(table: str, profile: str, warehouse: str | None,
+                         sleep: Callable[[float], None] = time.sleep,
+                         clock: Callable[[], float] = time.monotonic) -> list[Day]:
+    """Read sleep and HRV for every day from the gold table.
+
+    A cold warehouse can take longer than the first 50 s wait, so a statement that is
+    still pending or running is polled until it finishes. Big results come back in
+    chunks, and every chunk is read.
+    """
+    if not TABLE_NAME.fullmatch(table):
+        raise ValueError(f"not a table name: {table!r} (expected catalog.schema.table)")
     warehouse = warehouse or find_warehouse(profile)
     body = json.dumps({"warehouse_id": warehouse, "statement": QUERY.format(table=table),
                        "wait_timeout": "50s"})
     result = _databricks(["api", "post", "/api/2.0/sql/statements", "--json", body], profile)
+    deadline = clock() + QUERY_DEADLINE_S
+    while result.get("status", {}).get("state") in ("PENDING", "RUNNING"):
+        if clock() > deadline:
+            raise RuntimeError(f"query still running after {QUERY_DEADLINE_S} s")
+        sleep(5)
+        result = _databricks(["api", "get", f"/api/2.0/sql/statements/{result['statement_id']}"],
+                             profile)
     state = result.get("status", {}).get("state")
     if state != "SUCCEEDED":
         raise RuntimeError(f"query {state}: {result.get('status', {}).get('error')}")
-    rows = result.get("result", {}).get("data_array") or []
+    chunk = result.get("result") or {}
+    rows = list(chunk.get("data_array") or [])
+    while chunk.get("next_chunk_index") is not None:
+        chunk = _databricks(["api", "get", f"/api/2.0/sql/statements/{result['statement_id']}"
+                             f"/result/chunks/{chunk['next_chunk_index']}"], profile)
+        rows += chunk.get("data_array") or []
     return [Day(date.fromisoformat(d), None if s is None else float(s),
                 None if h is None else float(h)) for d, s, h in rows]
 
@@ -168,7 +206,8 @@ def report(model: Model, sleep_hours: float, hrv: float, days_ahead: int) -> str
     seen_from = int(model.counts[:, state].sum())
     lines = [
         f"Today: {sleep_hours:g} h sleep, HRV {hrv:g} ms -> {STATES[state]}",
-        f"  (cuts: sleep {model.sleep_cut:g} h, HRV {model.hrv_cut:g} ms = your median)",
+        f"  (cuts: sleep {model.sleep_cut:g} h, HRV {model.hrv_cut:g} ms "
+        f"{'= your median' if model.hrv_cut_is_median else 'from --hrv-cut'})",
         "",
         f"In {days_ahead} day{'s' if days_ahead != 1 else ''}:",
     ]
@@ -205,6 +244,10 @@ def main(argv: list[str] | None = None,
     args = parser.parse_args(argv)
     if args.days < 1:
         parser.error("--days must be at least 1")
+    numbers = [args.sleep, args.hrv, args.sleep_cut] + (
+        [] if args.hrv_cut is None else [args.hrv_cut])
+    if not all(math.isfinite(x) for x in numbers):
+        parser.error("--sleep, --hrv and the cuts must be real numbers (not nan or inf)")
     if args.sleep < 0 or args.hrv <= 0:
         parser.error("--sleep must be >= 0 and --hrv > 0")
 

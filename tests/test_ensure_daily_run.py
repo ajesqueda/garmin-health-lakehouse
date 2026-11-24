@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -51,6 +52,11 @@ class FakeCli:
     ([run(1, result="FAILED")], "start"),
     ([run(2, trigger="ONE_TIME", result="FAILED"), run(1, result="FAILED")], "leave"),
     ([run(2, trigger="ONE_TIME", result="SUCCESS")], "ok"),
+    ([run(1, life="WAITING_FOR_RESOURCES")], "ok"),  # any unfinished state is active
+    ([run(1, life="SOME_FUTURE_STATE")], "ok"),
+    ([run(1, life="SKIPPED")], "start"),
+    ([run(1, life="INTERNAL_ERROR", result="FAILED")], "start"),
+    ([run(2, trigger="ONE_TIME", result="CANCELED")], "start"),  # stopped, not broken
 ])
 def test_decide(runs, action):
     assert edr.decide(runs)[0] == action
@@ -102,6 +108,7 @@ def test_main_prints_one_log_line_and_exit_codes(capsys):
     assert edr.main([], factory(FakeCli(runs=[run(1, result="SUCCESS")])), clock) == 0
     leave = FakeCli(runs=[run(2, trigger="ONE_TIME", result="FAILED")])
     assert edr.main([], factory(leave), clock) == 2
+    assert not leave.started()
     lines = capsys.readouterr().out.strip().splitlines()
     assert lines[0].startswith("2026-11-20 09:07 CST START")
     assert " OK " in lines[1]
@@ -114,3 +121,27 @@ def test_cli_errors_become_an_error_line(capsys):
 
     assert edr.main([], lambda profile: broken, lambda tz: NOW) == 1
     assert "ERROR Error: invalid access token" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("error, message", [
+    (FileNotFoundError("databricks"), "couldn't run the databricks CLI"),
+    (subprocess.TimeoutExpired("databricks", 120), "didn't answer"),
+])
+def test_cli_launch_problems_are_one_error_line(monkeypatch, capsys, error, message):
+    def broken(*a, **k):
+        raise error
+    monkeypatch.setattr(subprocess, "run", broken)
+    assert edr.main([], clock=lambda tz: NOW) == 1
+    out = capsys.readouterr().out
+    assert out.count("\n") == 1 and " ERROR " in out and message in out
+
+
+def test_every_cli_call_has_a_timeout(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    edr.databricks_cli("free-pat")(["jobs", "list"])
+    assert seen["timeout"] > 0
