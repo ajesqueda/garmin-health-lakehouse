@@ -157,7 +157,10 @@ def test_cli_reports_a_failed_load(capsys):
 
 
 @pytest.mark.parametrize("args", [["--sleep", "7", "--hrv", "50", "--days", "0"],
-                                  ["--sleep", "-1", "--hrv", "50"]])
+                                  ["--sleep", "-1", "--hrv", "50"],
+                                  ["--sleep", "nan", "--hrv", "50"],
+                                  ["--sleep", "7", "--hrv", "inf"],
+                                  ["--sleep", "7", "--hrv", "50", "--hrv-cut", "nan"]])
 def test_cli_rejects_bad_input(args):
     with pytest.raises(SystemExit):
         main(args, loader=fake_loader([0, 0]))
@@ -173,7 +176,7 @@ class FakeRun:
 def test_loader_parses_rows_and_finds_the_warehouse(monkeypatch):
     calls = []
 
-    def fake_run(cmd, capture_output, text):
+    def fake_run(cmd, **kwargs):
         calls.append(cmd)
         if cmd[1] == "warehouses":
             return FakeRun(json.dumps([{"id": "wh1"}]))
@@ -193,4 +196,76 @@ def test_loader_explains_an_expired_login(monkeypatch):
         stderr='{"error":"invalid_grant","error_description":"Refresh token is invalid"}',
         returncode=1))
     with pytest.raises(RuntimeError, match="databricks auth login --profile free"):
+        hm.load_from_databricks("t", "free", "wh1")
+
+
+def test_negative_smoothing_is_rejected():
+    with pytest.raises(ValueError, match="negative"):
+        fit(history([0, 1, 2, 3]), smoothing=-1)
+
+
+def test_report_says_where_the_hrv_cut_came_from(capsys):
+    main(["--sleep", "8", "--hrv", "60"], loader=fake_loader([0, 1, 3, 0]))
+    assert "= your median" in capsys.readouterr().out
+    main(["--sleep", "8", "--hrv", "60", "--hrv-cut", "45"], loader=fake_loader([0, 1, 3, 0]))
+    out = capsys.readouterr().out
+    assert "from --hrv-cut" in out and "your median" not in out
+
+
+class FakeApi:
+    """Answers `databricks api ...` calls from a script of responses."""
+
+    def __init__(self, post, gets):
+        self.post, self.gets, self.paths = post, dict(gets), []
+
+    def __call__(self, cmd, **kwargs):
+        assert kwargs.get("timeout"), "every CLI call needs a timeout"
+        if cmd[2] == "post":
+            return FakeRun(json.dumps(self.post))
+        self.paths.append(cmd[3])
+        return FakeRun(json.dumps(self.gets[cmd[3]]))
+
+
+def test_loader_polls_a_slow_query_and_reads_every_chunk(monkeypatch):
+    base = "/api/2.0/sql/statements/s1"
+    api = FakeApi(post={"statement_id": "s1", "status": {"state": "PENDING"}}, gets={
+        base: {"statement_id": "s1", "status": {"state": "SUCCEEDED"}, "result": {
+            "data_array": [["2026-01-01", "7.5", "52"]], "next_chunk_index": 1}},
+        f"{base}/result/chunks/1": {"data_array": [["2026-01-02", "6", "48"]],
+                                    "next_chunk_index": 2},
+        f"{base}/result/chunks/2": {"data_array": [["2026-01-03", "8", "55"]]},
+    })
+    monkeypatch.setattr(subprocess, "run", api)
+    naps = []
+    days = hm.load_from_databricks("t", "free", "wh1", sleep=naps.append)
+    assert [d.day.day for d in days] == [1, 2, 3]
+    assert naps == [5]
+    assert api.paths == [base, f"{base}/result/chunks/1", f"{base}/result/chunks/2"]
+
+
+def test_loader_gives_up_on_a_query_that_never_finishes(monkeypatch):
+    running = {"statement_id": "s1", "status": {"state": "RUNNING"}}
+    monkeypatch.setattr(subprocess, "run", FakeApi(
+        post=running, gets={"/api/2.0/sql/statements/s1": running}))
+    ticks = iter(range(0, 10_000, 100))
+    with pytest.raises(RuntimeError, match="still running"):
+        hm.load_from_databricks("t", "free", "wh1", sleep=lambda s: None,
+                                clock=lambda: next(ticks))
+
+
+@pytest.mark.parametrize("table", ["t; DROP TABLE x", "a.b.c.d", "gold daily", ""])
+def test_loader_rejects_anything_but_a_table_name(table):
+    with pytest.raises(ValueError, match="not a table name"):
+        hm.load_from_databricks(table, "free", "wh1")
+
+
+@pytest.mark.parametrize("error, message", [
+    (FileNotFoundError("databricks"), "isn't installed"),
+    (subprocess.TimeoutExpired("databricks", 120), "didn't answer"),
+])
+def test_cli_problems_become_clear_errors(monkeypatch, error, message):
+    def broken(*a, **k):
+        raise error
+    monkeypatch.setattr(subprocess, "run", broken)
+    with pytest.raises(RuntimeError, match=message):
         hm.load_from_databricks("t", "free", "wh1")
