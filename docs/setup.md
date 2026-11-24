@@ -142,13 +142,19 @@ already failed.
 
    ```bash
    APP="$HOME/Library/Application Support/garmin-lakehouse"
-   mkdir -p "$APP" ~/Library/Logs && cp scripts/ensure_daily_run.py "$APP/"
+   PLIST="$HOME/Library/LaunchAgents/com.garmin-lakehouse.ensure-daily-run.plist"
+   mkdir -p "$APP" "$HOME/Library/Logs" "$HOME/Library/LaunchAgents" &&
+   cp scripts/ensure_daily_run.py "$APP/" &&
    sed -e "s|REPO/scripts|$APP|" -e "s|DATABRICKS|$(dirname "$(which databricks)")|" \
-       -e "s|LOGS|$HOME/Library/Logs|g" scripts/ensure_daily_run.plist.template \
-       > ~/Library/LaunchAgents/com.garmin-lakehouse.ensure-daily-run.plist
-   launchctl load ~/Library/LaunchAgents/com.garmin-lakehouse.ensure-daily-run.plist
+       -e "s|LOGS|$HOME/Library/Logs|g" scripts/ensure_daily_run.plist.template > "$PLIST" &&
+   { launchctl unload "$PLIST" 2>/dev/null; launchctl load "$PLIST"; } &&
    launchctl start com.garmin-lakehouse.ensure-daily-run   # try it once now
    ```
+
+   Each step runs only if the one before it worked, so a failed copy never leaves a
+   job pointing at a missing script. The `unload` makes a reinstall pick up the new
+   plist (`load` alone keeps the old one). The paths must not contain `|` or `&`,
+   which `sed` would read as special characters; the default ones don't.
 
    If the Mac is asleep at 9:07, launchd runs it at wake-up. Each run adds one line to
    `~/Library/Logs/garmin-ensure-daily-run.log`. After changing the script, copy it
