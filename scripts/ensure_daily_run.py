@@ -7,7 +7,8 @@ morning from your own computer (launchd on a Mac, see docs/setup.md):
 
 - a run that started today and succeeded, or is still running -> nothing to do
 - no run today, or only failed ones -> start one, at most once per day
-- a run this script started today already failed -> leave it alone and say so
+- a manual run already failed today -> leave it alone and say so (a canceled one
+  doesn't count: someone stopped it, it didn't break)
 
     python scripts/ensure_daily_run.py --profile free-pat
     python scripts/ensure_daily_run.py --profile free-pat --dry-run
@@ -27,13 +28,22 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 Cli = Callable[[list[str]], object]
-ACTIVE = {"PENDING", "QUEUED", "RUNNING", "TERMINATING", "BLOCKED", "WAITING_FOR_RETRY"}
+# Any life-cycle state other than these means the run hasn't finished yet, including
+# states added later (WAITING_FOR_RESOURCES, ...), so it is never started twice.
+FINISHED = {"TERMINATED", "SKIPPED", "INTERNAL_ERROR"}
+TIMEOUT_S = 120
 
 
 def databricks_cli(profile: str) -> Cli:
     def run(args: list[str]) -> object:
-        proc = subprocess.run(["databricks", *args, "--profile", profile, "-o", "json"],
-                              capture_output=True, text=True)
+        try:
+            proc = subprocess.run(["databricks", *args, "--profile", profile, "-o", "json"],
+                                  capture_output=True, text=True, timeout=TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"databricks {args[0]} {args[1]} didn't answer in "
+                               f"{TIMEOUT_S} s") from None
+        except OSError as exc:  # not installed, or not on launchd's PATH
+            raise RuntimeError(f"couldn't run the databricks CLI: {exc}") from None
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.strip()[:300] or f"databricks {args[0]} failed")
         return json.loads(proc.stdout) if proc.stdout.strip() else {}
@@ -62,9 +72,11 @@ def decide(runs: list[dict]) -> tuple[str, str]:
         state = r.get("state", {})
         if state.get("result_state") == "SUCCESS":
             return "ok", f"run {r['run_id']} ({r.get('trigger')}) succeeded today"
-        if state.get("life_cycle_state") in ACTIVE:
-            return "ok", f"run {r['run_id']} ({r.get('trigger')}) is in progress"
-    manual = [r for r in runs if r.get("trigger") == "ONE_TIME"]
+        life = state.get("life_cycle_state")
+        if life and life not in FINISHED:
+            return "ok", f"run {r['run_id']} ({r.get('trigger')}) is in progress ({life})"
+    manual = [r for r in runs if r.get("trigger") == "ONE_TIME"
+              and r.get("state", {}).get("result_state") != "CANCELED"]
     if manual:
         return "leave", (f"a manual run ({manual[0]['run_id']}) already failed today; "
                          "not retrying, check the run's error")
